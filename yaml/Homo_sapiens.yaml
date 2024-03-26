@@ -1,0 +1,28 @@
+organism:
+  name: human
+  genus: "Homo sapiens"
+  abbreviation: "hs"
+  taxon: 9606
+
+  genome_version: GRCh38
+  genome_size: "2913022398"
+  
+  files:
+    genome: /fast/projects/cubit/18.12/static_data/reference/GRCh38/p7.chr_scaff/GRCh38.p7.genome.chr_scaff.fa
+    transcriptome: ""
+    gtf: /fast/projects/cubit/18.12/static_data/annotation/GENCODE/25/GRCh38/gencode.v25.chr_scaff.annotation.gtf
+    
+    bed: /fast/projects/cubit/18.12/static_data/annotation/GENCODE/25/GRCh38/gencode.v25.chr_scaff.annotation.bed                                   # required for infer_experiment
+    seqc_gtf: /fast/projects/cubit/18.12/static_data/annotation/GENCODE/25/GRCh38/gencode.v25.chr_scaff.annotation.no_genes.protein_coding.rRNA.gtf # required for qc
+
+    cellranger_transcriptome: /fast/projects/cubit/20.05/static_data/app_support/CellRanger/exp/3.1.0/GRCh38-and-mm10/
+    cellranger_gtf: /fast/projects/cubit/20.05/static_data/app_support/CellRanger/exp/3.1.0/GRCh38-and-mm10/genes/genes.gtf
+    velocyto_mask_gtf: ""
+
+  star_index: null
+  salmon_index: null
+  bwa_index: null    
+  cellranger_count: null
+
+  R:
+    annotations: org.Hs.eg.db

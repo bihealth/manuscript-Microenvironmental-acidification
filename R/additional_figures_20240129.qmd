@@ -1,0 +1,551 @@
+---
+title: "Additional figures for the manuscript"
+substitle: "Cytokine & mRNA expression"
+author: "January Weiner"
+always_allow_html: true
+date: "`r Sys.Date()`"
+format:
+  html:
+    code-fold: true
+    number-sections: true
+    footnotes-hover: true
+    self-contained: true
+    toc-location: left
+    embed-resources: true
+  docx:
+    toc: true
+    number-sections: true
+execute:
+  echo: false
+  message: false
+  warning: false
+crossref:
+  fig-title: '**Figure**'
+editor_options: 
+  chunk_output_type: console
+---
+
+
+
+```{r}
+library(tidyverse)
+library(Rseasnap)
+library(readxl)
+library(janitor)
+library(ggplot2)
+theme_set(theme_minimal())
+library(ggbeeswarm)
+library(extrafont)
+library(ggpattern)
+library(pander)
+loadfonts(device = "pdf")
+library(tmod)
+library(ggrepel)
+```
+
+
+```{r}
+#| label: load-rnaseq-data
+pip    <- load_de_pipeline("report_all/DE_config.yaml")
+rnaseq <- get_exprs(pip)
+covar  <- get_covariates(pip)
+annot  <- get_annot(pip)
+cntrst <- get_contrasts(pip)
+counts <- get_counts(pip)
+rld    <- get_object(pip, step = "DESeq2", extension = "rld.blind.rds") %>%
+  assays() %>% .[[1]] %>% as.data.frame() %>% rownames_to_column("gene_name")
+tmod_dbs <- get_tmod_dbs(pip)
+tmod_map <- get_tmod_mapping(pip)
+```
+
+```{r}
+#| label: load-cytokine-data
+cyt_file  <- "Cytokines.xlsx"
+cytokines <- excel_sheets(cyt_file) %>% set_names()
+
+## Excel sheet 5 has two extra rows, not one
+skips <- rep(1, 8) %>% set_names(cytokines)
+skips[5] <- 2
+dat_raw   <- map(cytokines, ~ read_excel(cyt_file, sheet = .x, skip=skips[.x]))
+
+## units
+cyt_u_raw <- map(cytokines, ~ read_excel(cyt_file, sheet = .x, col_names = FALSE) %>% select(1:3) %>% 
+  dplyr::slice(1))
+
+cyt_u <- map_chr(cyt_u_raw, ~ {
+
+  ifelse(grepl("densitometry", .x[[1]][1]), "ratio",
+    ifelse(grepl("g/g tissue", .x[[2]][1]), 
+      gsub(".*([pn]g/g).*", "\\1", .x[[2]][1]),
+      gsub(".*([pn]g/g).*", "\\1", .x[[3]][1])))
+
+
+})
+
+## remove empty columns
+dat <- map(dat_raw, ~ {
+  empty_cols <- map_lgl(.x, ~ all(is.na(.x)))
+  empty_rows <- apply(.x, 1, function(x) all(is.na(x)))
+  .x[!empty_rows, !empty_cols]
+})
+
+## fix broken Excel sheet #5
+colnames(dat[[5]])[1] <- "lung_patient_name"
+
+## remove pro-Il1-b because it does not have a gene name
+## dat <- dat[-7]
+
+## clean up column names
+dat <- map(dat, ~ {
+  .x %>% clean_names()
+})
+
+## extract gene names which are included as additional information
+gene_names <- map_chr(dat, ~ {
+  ret <- .x %>% filter(grepl("Gene name:", lung_patient_name)) %>% pull(lung_patient_name)
+  ret <- str_remove(ret, "Gene name: ")
+  if(length(ret) == 0) {
+    ret <- NA_character_
+  }
+  ret
+})
+
+## sheet #7 misses a gene name, but it is the same as sheet #2 
+gene_names[7] <- gene_names[2]
+
+## remove rows with gene names
+dat <- map(dat, ~ .x %>% filter(!grepl("Gene name:", lung_patient_name)))
+
+## manually fixing broken Excel format
+## basically, columns that start with "x" contain an additional
+## measurement.
+## we will calculate the average for these two measurements and then remove
+## the column
+dat <- map(dat, ~ {
+  x_cols <- grepl("^x", colnames(.x))
+
+  for(i in which(x_cols)) {
+    .x[[i - 1]] <- ifelse(is.na(.x[[i]]), .x[[i - 1]], (.x[[i - 1]] + .x[[i]]) / 2)
+  }
+  .x[ , !x_cols]
+})
+
+## finally, put everything together in one data frame
+cytokine_dat <- imap_dfr(dat, ~ 
+  .x %>% mutate(cytokine = .y, gene_name = gene_names[.y])
+) %>% relocate(cytokine, gene_name, .before = 1)
+
+## convert to long format for plotting
+
+cytokine_dat_l <- cytokine_dat %>%
+  pivot_longer(-c(cytokine, gene_name, lung_patient_name), names_to = "Group", values_to = "value") %>%
+  drop_na(value) %>%
+  mutate(unit  = cyt_u[as.character(cytokine)]) %>%
+  mutate(cytokine = gsub("beta", "β", cytokine)) %>%
+  mutate(cytokine = gsub("alpha", "α", cytokine)) %>%
+  mutate(cytokine = factor(cytokine, levels = c("COX-2", "pro-IL-1β",
+    "IL-6", "IL-1β", 
+    "IL-8", "GM-CSF", "TNF-α",
+    "IL-10"))) %>%
+  mutate(label = ifelse(unit == "ratio", 
+    sprintf("Ratio of %s/β actin\nfold induction to control", cytokine),
+    sprintf("%s [%s tissue]", cytokine, unit))) %>%
+  arrange(cytokine) %>%
+  mutate(label = factor(label, 
+    levels = unique(label))) %>%
+  mutate(Condition = c( s_p_wt="S.p. WT", ctr = "Ctrl", hepes = "Hepes",
+  s_p_wt_hepes = "S.p. WT + Hepes")[Group])
+```
+
+
+
+```{r}
+#| label: fig-plot-cytokine-data
+#| fig.cap: Cytokine expression. Recreated from the original data.
+#| fig.width: 8
+#| fig.height: 8
+## recreate the original figure as boxplot to check that we have loaded the
+## data correctly
+ggplot(cytokine_dat_l, aes(x=Condition, y=value)) +
+  ## no outliers
+  geom_boxplot(outlier.shape = NA) +
+  geom_beeswarm() +
+  scale_y_log10() +
+  facet_wrap(~ label, scales = "free_y", ncol = 2, strip.position = "left") +
+  ylab("") +
+  theme_minimal() +
+  theme(strip.placement = "outside") +
+  theme(text = element_text(family = "Arial", size = 12)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+dev.copy2pdf(out.type="cairo", file="cytokines_boxplot_recreated.pdf")
+```
+
+
+
+
+
+```{r}
+#| label: fig-plot-rnaseq-data
+#| fig.width: 8
+#| fig.height: 8
+#| fig-cap: mRNA expression for selected genes. Expression is normalized
+#|          and log~2~-transformed using the rlog function from DESeq2
+#|          package.
+## create analogous plot with cytokine data only
+genes <- annot %>% filter(SYMBOL %in% cytokine_dat_l$gene_name)
+ids   <- genes$ENSEMBL
+
+rdat <- rnaseq %>% as.data.frame %>% 
+  rownames_to_column("ENSEMBL") %>%
+  filter(ENSEMBL %in% ids) 
+rdat_l <- rdat %>% pivot_longer(-ENSEMBL, names_to = "Sample", values_to = "expression") %>%
+  left_join(covar %>% select(label, hepes, group, g.h), by = c("Sample" = "label")) %>%
+  filter(group %in% c("Ctr", "Sp_D39")) %>%
+  left_join(annot %>% select(ENSEMBL, SYMBOL), by = "ENSEMBL") %>%
+  rename(SYMBOL = "gene_name") %>%
+  rename(g.h = "Group")
+
+ggplot(rdat_l, aes(x=Group, y=expression)) +
+  ## no outliers
+  geom_boxplot(outlier.shape = NA) +
+  geom_beeswarm() +
+  facet_wrap(~ gene_name, scales = "free_y", ncol = 2, strip.position = "left") +
+  ylab("") +
+  theme_minimal() +
+  theme(strip.placement = "outside") +
+  theme(text = element_text(family = "Arial", size = 12)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+dev.copy2pdf(out.type="cairo", file="rna_boxplot.pdf")
+```
+
+```{r results="markdown"}
+#| label: tbl-rnaseq-data
+#| column: page
+#| tbl-cap: |
+#|   Results of differential expression analysis for pre-selected genes.
+#|   FDR control was performed using the Benjamini-Hochberg method within
+#|   the pre-selected data set. pvalue, raw p-value with no correction;
+#|   padj, p-value corrected for false discovery rate for the whole data
+#|   set; FDR, p-value corrected for false discovery rate for the set of
+#|   selected genes.
+
+test_dat <- imap_dfr(cntrst, ~ 
+  .x %>% rownames_to_column("ENSEMBL") %>%
+  dplyr::slice(match(ids, ENSEMBL)) %>%
+  mutate(Contrast = gsub("_ID[0-9]+$", "", .y))
+  ) %>%
+  filter(Contrast %in% c("Sp_no_HEPES_vs_Ctr_no_HEPES", "Sp_HEPES_vs_Ctr_HEPES", "Sp_HEPES_vs_Sp_no_HEPES")) %>%
+  left_join(annot[ , c("ENSEMBL", "SYMBOL")], by="ENSEMBL") %>%
+  relocate(SYMBOL, .before = ENSEMBL) %>%
+  mutate(FDR = p.adjust(pvalue, method = "BH"))
+
+test_dat_w <- test_dat %>% 
+  dplyr::select(SYMBOL, Contrast, log2FoldChange, FDR) %>%
+  pivot_wider(values_from = c("log2FoldChange", "FDR"), names_from = "Contrast") %>%
+  select(c(1, 2, 5, 3, 6, 4, 7)) %>%
+  mutate(across(starts_with("FDR"), ~ format.pval(., digits=2))) %>%
+  mutate(across(starts_with("log2"), ~ format(., digits=2)))
+
+test_dat_l <- test_dat %>%
+  select(Contrast, SYMBOL, ENSEMBL, log2FoldChange, pvalue, padj, FDR) %>%
+  mutate(across(pvalue:FDR, ~ format.pval(., digits=2))) %>%
+  arrange(Contrast, SYMBOL) %>%
+  mutate(Contrast = ifelse(duplicated(Contrast), "", Contrast))
+
+test_dat_l %>% pander(split.table = Inf)
+```
+
+
+
+```{r}
+#| label: fig-combined-data-plot
+#| fig.width: 8
+#| fig.height: 8
+#| fig-cap: |
+#|   Cytokine and RNA-seq data for the same genes. The RNA-seq data is
+#|   relative and log-normalized. The cytokine data is shown on the log10 scale.
+#|   Points correspond to group median values.
+#|   Squares show the corresponding interquartile ranges and whiskers show the
+#|   range of the data.
+
+group_map <- c(ctr = "Ctr", hepes = "HEPES", s_p_wt = "S.p. WT", s_p_wt_hepes = "S.p. WT + HEPES")
+cyto_sum <- cytokine_dat_l %>%
+  group_by(gene_name, cytokine, label, Group) %>%
+  summarise(median=median(value), q1=quantile(value, 0.25), q3=quantile(value, 0.75),
+          min=min(value), max=max(value)) %>%
+  ungroup() %>%
+  mutate(Group=group_map[Group])
+
+group_map <- c(Ctr.no_HEPES = "Ctr", Ctr.HEPES = "HEPES", Sp_D39.no_HEPES = "S.p. WT", Sp_D39.HEPES = "S.p. WT + HEPES")
+rna_sum <- rdat_l %>%
+  group_by(gene_name, Group) %>%
+  summarise(median=median(expression), q1=quantile(expression, 0.25), q3=quantile(expression, 0.75),
+          min=min(expression), max=max(expression)) %>%
+  ungroup() %>%
+  mutate(Group=group_map[Group])
+
+foo <- merge(rna_sum, cyto_sum, by=c("Group", "gene_name"), all.x=TRUE) 
+
+ggplot(foo, aes(x = median.x, y = median.y, fill=Group, color=Group)) +
+  geom_point() +
+  geom_errorbarh(aes(xmin = min.x, xmax = max.x, y = median.y)) +
+  geom_errorbar(aes(ymin = min.y, ymax = max.y, x = median.x)) +
+  geom_rect(aes(xmin = q1.x, xmax = q3.x, ymin = q1.y, ymax = q3.y), alpha = 0.2) +
+  xlab("log₂ gene expression") +
+  ylab("") +
+  scale_y_log10() +
+  facet_wrap(~ label, scales = "free", ncol = 2, strip.position = "left") +
+  theme_minimal() +
+  theme(strip.placement = "outside") +
+  theme(text = element_text(family = "Arial", size = 12)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+dev.copy2pdf(out.type="cairo", file="cytokine_rna_boxplot_2d.pdf")
+```
+
+```{r}
+#| label: fig-combined-data-plot-alternative
+#| fig.width: 8
+#| fig.height: 8
+#| fig-cap: |
+#|   Cytokine and RNA-seq data for the same genes. The RNA-seq data is
+#|   relative and log-normalized. The cytokine data is shown on the log10 scale.
+#|   Points correspond to group median values.
+#|   Squares show the corresponding interquartile ranges and whiskers show the
+#|   range of the data.
+
+
+ggplot(foo, aes(x = median.x, y = median.y, fill=Group, pattern = Group)) +
+  geom_point() +
+  geom_errorbarh(aes(xmin = min.x, xmax = max.x, y = median.y)) +
+  geom_errorbar(aes(ymin = min.y, ymax = max.y, x = median.x)) +
+  geom_rect_pattern(aes(xmin = q1.x, xmax = q3.x, ymin = q1.y, ymax = q3.y), alpha = 0.2, color="black", 
+    pattern_density = .05, pattern_angle = 45, pattern_spacing = .02,
+    pattern_fill="black") +
+  scale_fill_manual(values = c("Ctr" = "#FFFFFF", "HEPES" = "#FFFFFF", "S.p. WT" = "#666666", "S.p. WT + HEPES" = "#666666")) +
+  scale_pattern_manual(values = c("Ctr" = "none", "HEPES" = "stripe", "S.p. WT" = "none", "S.p. WT + HEPES" = "stripe")) +
+  xlab("log₂ gene expression") +
+  ylab("") +
+  scale_y_log10() +
+  facet_wrap(~ label, scales = "free", ncol = 2, strip.position = "left") +
+  theme_minimal() +
+  theme(strip.placement = "outside") +
+  theme(text = element_text(family = "Arial", size = 12)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+dev.copy2pdf(out.type="cairo", file="cytokine_rna_boxplot_2d_alternative.pdf")
+```
+
+
+# New figures
+
+Figures:
+
+ * heatmap with genes from the selected gene set (X)
+ * heatmap with top genes from the interesting comparisons (X)
+ * disco plot of Sp_no_HEPES_vs_Ctrl_no_HEPES VS ph6_vs_Ctrl_no_HEPES (X)
+ * heatmap of logFC for the various comparisons and genes from the pathway
+ * boxplot with eigengenes for the selected gene set (X)
+
+
+```{r}
+go_id <- "GO:0007043"
+msigdb_id <- "M15540"
+mset <- tmod_dbs$msigdb_go_bp$dbobj[msigdb_id]
+go_genes <- as.character(getModuleMembers(msigdb_id, mset=mset)[[1]])
+map_id <- tmod_map$dbs[ "msigdb_go_bp" ]
+map_genes  <- tmod_map$maps[[ map_id ]]
+
+go_genes <- names(map_genes)[ match(go_genes, map_genes) ]
+go_genes <- go_genes[ !is.na(go_genes) ]
+```
+
+
+```{r}
+#| label: fig-heatmap-genes-cell-junction
+#| fig.width: 8
+#| fig.height: 20
+#| fig-cap: |
+#|   Heatmap of the normalized expression values for the selected genes in the cell junction pathway
+#|   (GO:0007043). The genes are ordered by hierarchical clustering. The
+#|   expression values are scaled for each gene.
+library(pheatmap)
+
+## filling in patient ordinal number (according to DF, discussion on 29.1.2024)
+covar <- covar %>%
+  mutate(sample_no = as.numeric(gsub(".*_S([0-9]+)$", "\\1", label))) %>%
+  arrange(batch, sample_no) %>%
+  group_by(g.h) %>%
+  mutate(patient_id = 1:7)
+  
+mtx <- rld %>% filter(gene_name %in% go_genes)
+gn <- mtx$gene_name
+mtx <- mtx %>% select(-gene_name) %>% as.matrix()
+rownames(mtx) <- tmod_map$maps[[ "9606.SYMBOL.org.Hs.eg.db" ]][gn]
+
+## first, reorder the covariate file to get the required order
+covar <- covar %>% 
+  mutate(ordering_group = factor(g.h, levels = c(
+    "Ctr.no_HEPES",
+    "Ctr.HEPES",
+    "Sp_D39.no_HEPES",
+    "Sp_D39.HEPES",
+    "pH_6.no_HEPES"
+  ))) %>%
+arrange(ordering_group, patient_id)
+library(writexl)
+write_xlsx(covar, "covariate_file.xlsx")
+
+## rearrange the matrix such that the order is the same as in the covariate file
+mtx <- mtx[ , covar$label ]
+mtx <- mtx[ order(rownames(mtx)), ]
+
+colnames(mtx) <- paste0("  ", covar$g.h, " ", covar$patient_id)
+
+pheatmap(mtx, cluster_rows=FALSE, cluster_cols=FALSE, show_rownames=TRUE, show_colnames=TRUE,
+  scale = "row", color = colorRampPalette(c("blue", "white", "red"))(100))
+dev.copy2pdf(file="go0007043_genes_heatmap.pdf")
+```
+
+
+```{r results="hide",output="false",include="false"}
+# selecting top genes per contrast
+cids <- c("Sp_no_HEPES_vs_Ctr_no_HEPES_ID2", "pH6_vs_Ctr_no_HEPES_ID3")
+genes <- map(cntrst[cids], ~ {
+  .x %>%
+  rownames_to_column("gene_name") %>%
+  arrange(pvalue) %>%
+  dplyr::filter(!is.na(padj)) %>%
+  dplyr::slice(1:75) %>%
+  pull(gene_name)
+}) %>% unlist() %>% unique()
+mtx <- rld %>% filter(gene_name %in% genes)
+gn <- mtx$gene_name
+mtx <- mtx %>% select(-gene_name) %>% as.matrix()
+rownames(mtx) <- tmod_map$maps[[ "9606.SYMBOL.org.Hs.eg.db" ]][gn]
+
+## rearrange the matrix such that the order is the same as in the covariate file
+mtx <- mtx[ , covar$label ]
+
+colnames(mtx) <- paste0("  ", covar$g.h, " ", covar$patient_id)
+
+foo <- pheatmap(mtx, cluster_rows=TRUE, cluster_cols=FALSE, show_rownames=TRUE, show_colnames=TRUE,
+  scale = "row", color = colorRampPalette(c("blue", "white", "red"))(100))
+
+## getting block information as requested by DF and AK
+
+clustered_genes <- foo$tree_row$labels[ foo$tree_row$order ]
+block1 <- clustered_genes[ 1:44 ]
+block2 <- clustered_genes[ 45:65 ]
+block3 <- clustered_genes[ 66:92 ]
+block4 <- clustered_genes[ 93:127 ]
+
+sel_genes <- c(sort(block1), sort(block2), sort(block3), sort(block4))
+
+mtx <- mtx[ sel_genes,  ]
+#mtx <- rbind(mtx[1:44, ], rep(NA, ncol(mtx)), mtx[45:65, ], rep(NA, ncol(mtx)), mtx[66:127, ])
+h2 <- pheatmap(mtx, cluster_rows=FALSE, 
+  gaps_row = c(44, 44, 44, 65, 65, 65, 88, 88, 88),
+  cluster_cols=FALSE, show_rownames=TRUE, show_colnames=TRUE,
+  na_col="white",
+  scale = "row", color = colorRampPalette(c("blue", "white", "red"))(100))
+```
+
+```{r}
+#| label: fig-heatmap-genes-top-genes
+#| fig.width: 8
+#| fig.height: 20
+#| fig-cap: |
+#|   Heatmap of the normalized expression values for the selected 75 genes 
+#|   that are most differentially
+#|   expressed between the two comparisons of interest (Sp_no_HEPES_vs_Ctrl_no_HEPES and pH6_vs_Ctr_no_HEPES). 
+#|   The genes are ordered by hierarchical clustering. The
+#|   expression values are scaled for each gene.
+
+h2
+dev.copy2pdf(file="top_genes_heatmap.pdf")
+```
+
+
+
+
+```{r}
+#| label: fig-disco-plot
+#| fig.width: 8
+#| fig.height: 8
+#| fig-cap: |
+#|   Disco plot of the two comparisons of interest (Sp_no_HEPES_vs_Ctrl_no_HEPES and pH6_vs_Ctr_no_HEPES).
+#|   The genes are colored by the disco score. Labels are shown for the genes in the selected gene set
+#|   (GO:0007043).
+sel_cntr <- map(cntrst[cids], ~ {
+  .x %>% rownames_to_column("PrimaryID") })
+plot_labels <- annot %>% filter(PrimaryID %in% go_genes) %>%
+  select(PrimaryID, label=SYMBOL)
+
+foo <- plot_disco(sel_cntr[[1]], sel_cntr[[2]], annot=annot, by="PrimaryID")
+foo$data <- left_join(foo$data, plot_labels, by="PrimaryID")
+foo$data$label[ is.na(foo$data$label) ] <- ""
+foo + geom_text(aes(label=label), size=3, hjust=0, vjust=0) +
+  xlab(cids[1]) + ylab(cids[2])
+  
+```
+
+
+```{r}
+#| label: fig-eigengene-boxplot
+#| fig.width: 8
+#| fig.height: 5
+#| fig-cap: |
+#|   Boxplot of the eigengene values for the selected gene set (GO:0007043).
+mtx <- rld %>% filter(gene_name %in% go_genes)
+gn <- mtx$gene_name
+mtx <- mtx %>% select(-gene_name) %>% as.matrix()
+entr_ids <- annot$ENTREZID[ match(gn, annot$PrimaryID) ]
+eig <- t(eigengene(mtx, entr_ids, mset=mset))
+df <- data.frame(label = rownames(eig), Eigengene = eig[,1])
+df <- left_join(df, covar, by="label")
+ggplot(df, aes(x = g.h, y = Eigengene)) +
+  geom_boxplot() +
+  geom_beeswarm() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  theme(text = element_text(family = "Arial", size = 12))
+```
+
+
+
+```{r}
+#| label: fig-eigengene-boxplot-tmod
+#| fig.width: 8
+#| fig.height: 5
+#| fig-cap: |
+#|   Boxplot of the eigengene values for the gene set "myeloid, dendritic
+#|   cell activation via NFkB (I)" (tmod ID LI.M43.0).
+
+tmod_id <- "LI.M43.0"
+tmod_mset <- tmod_dbs$tmod$dbobj[tmod_id]
+tmod_genes <- as.character(getModuleMembers(tmod_id, mset=tmod_mset)[[1]])
+tmod_map_id <- tmod_map$dbs[ "tmod" ]
+tmod_map_genes  <- tmod_map$maps[[ tmod_map_id ]]
+
+tmod_genes <- names(tmod_map_genes)[ match(tmod_genes, tmod_map_genes) ]
+tmod_genes <- tmod_genes[ !is.na(tmod_genes) ]
+
+mtx <- rld %>% filter(gene_name %in% tmod_genes)
+gn <- mtx$gene_name
+mtx <- mtx %>% select(-gene_name) %>% as.matrix()
+tmod_symbol_ids <- annot$SYMBOL[ match(gn, annot$PrimaryID) ]
+
+eig <- t(eigengene(mtx, tmod_symbol_ids, mset=tmod_mset))
+df <- data.frame(label = rownames(eig), Eigengene = eig[,1])
+df <- left_join(df, covar, by="label")
+ggplot(df, aes(x = g.h, y = Eigengene)) +
+  geom_boxplot() +
+  geom_beeswarm() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  theme(text = element_text(family = "Arial", size = 12))
+
+```
+
+
+
+
